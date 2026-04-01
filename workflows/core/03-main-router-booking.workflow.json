@@ -1,0 +1,257 @@
+{
+  "name": "JERRYTECH - 03 Main Router + Booking + Status + Quotes",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp",
+        "responseMode": "onReceived",
+        "options": { "responseCode": 200 }
+      },
+      "id": "c301-node-0001-0001-000000000001",
+      "name": "Webhook - Receive Message",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "jerrytech-whatsapp-messages"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract & validate the incoming WhatsApp message.\n// Meta also sends status events (delivered, read) — we filter those out.\n\nconst body = $input.first().json.body;\n\nif (!body?.entry?.[0]?.changes?.[0]?.value?.messages) {\n  return []; // Not a message event — stop workflow\n}\n\nconst value   = body.entry[0].changes[0].value;\nconst message = value.messages[0];\nconst contact = value.contacts?.[0];\n\nconst msgType = message.type;\nlet messageText   = '';\nlet buttonReplyId = null;\n\nif (msgType === 'text') {\n  messageText = message.text?.body || '';\n} else if (msgType === 'interactive') {\n  const iType = message.interactive?.type;\n  if (iType === 'button_reply') {\n    buttonReplyId = message.interactive.button_reply.id;\n    messageText   = message.interactive.button_reply.title;\n  } else if (iType === 'list_reply') {\n    buttonReplyId = message.interactive.list_reply.id;\n    messageText   = message.interactive.list_reply.title;\n  }\n} else if (msgType === 'button') {\n  buttonReplyId = message.button?.payload;\n  messageText   = message.button?.text || '';\n}\n\nreturn [{\n  json: {\n    from:          message.from,\n    messageId:     message.id,\n    messageType:   msgType,\n    messageText,\n    buttonReplyId,\n    customerName:  contact?.profile?.name || 'there',\n    phoneNumberId: value.metadata.phone_number_id,\n    timestamp:     message.timestamp\n  }\n}];"
+      },
+      "id": "c301-node-0002-0002-000000000002",
+      "name": "Extract Message Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/Sessions?filterByFormula=({Phone}='{{ $json.from }}')",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.AIRTABLE_API_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c301-node-0003-0003-000000000003",
+      "name": "Get Session from Airtable",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════════════════════\n// JERRYTECH Main Bot Brain — Part 4 (Final)\n// Routes: Greeting · Booking · Status Check · Price Quotes\n// ═══════════════════════════════════════════════════════════════════════\n\nconst msg = $('Extract Message Data').first().json;\nconst { from, messageText, buttonReplyId, customerName, phoneNumberId } = msg;\n\n// ── Session ───────────────────────────────────────────────────────────────\nconst sessionRecords = $input.first().json.records || [];\nconst sessionRecord  = sessionRecords[0] || null;\nconst session = {\n  step:        sessionRecord?.fields?.Step        || 'idle',\n  tempDevice:  sessionRecord?.fields?.TempDevice  || '',\n  tempProblem: sessionRecord?.fields?.TempProblem || '',\n  tempDate:    sessionRecord?.fields?.TempDate    || ''\n};\n\n// ── WhatsApp message builders ─────────────────────────────────────────────\nconst textMsg = (text) => ({\n  messaging_product: 'whatsapp', recipient_type: 'individual', to: from,\n  type: 'text', text: { body: text }\n});\n\nconst buttonMsg = (bodyText, footer, buttons) => ({\n  messaging_product: 'whatsapp', recipient_type: 'individual', to: from,\n  type: 'interactive',\n  interactive: {\n    type: 'button',\n    body:   { text: bodyText },\n    footer: { text: footer },\n    action: { buttons: buttons.map(b => ({ type: 'reply', reply: { id: b.id, title: b.title } })) }\n  }\n});\n\nconst listMsg = (bodyText, btnLabel, rows) => ({\n  messaging_product: 'whatsapp', recipient_type: 'individual', to: from,\n  type: 'interactive',\n  interactive: {\n    type: 'list',\n    body:   { text: bodyText },\n    action: { button: btnLabel, sections: [{ title: 'Select one', rows }] }\n  }\n});\n\n// Shared device list rows (reused in booking + quote flows)\nconst DEVICE_ROWS = [\n  { id: 'device_iphone',  title: 'iPhone',      description: 'Apple iPhone' },\n  { id: 'device_samsung', title: 'Samsung',     description: 'Galaxy series' },\n  { id: 'device_tecno',   title: 'Tecno',       description: 'Spark / Camon / Pop' },\n  { id: 'device_infinix', title: 'Infinix',     description: 'Hot / Note / Zero' },\n  { id: 'device_other',   title: 'Other Brand', description: 'Huawei, Xiaomi, etc.' }\n];\n\nconst DEVICE_MAP = {\n  device_iphone: 'iPhone', device_samsung: 'Samsung',\n  device_tecno: 'Tecno',   device_infinix: 'Infinix', device_other: 'Other'\n};\n\n// ── Price table — edit amounts to match your rates (currency: GHS) ────────\nconst PRICES = {\n  iPhone:  { repair_screen: [350,700], repair_battery: [150,220], repair_charging: [100,180], repair_camera: [200,400], repair_water: [150,400], repair_software: [80,150],  repair_speaker: [120,200] },\n  Samsung: { repair_screen: [250,550], repair_battery: [100,180], repair_charging: [80,150],  repair_camera: [150,300], repair_water: [120,350], repair_software: [70,130],  repair_speaker: [100,180] },\n  Tecno:   { repair_screen: [100,250], repair_battery: [60,120],  repair_charging: [50,100],  repair_camera: [80,170],  repair_water: [80,220],  repair_software: [50,100],  repair_speaker: [60,120]  },\n  Infinix: { repair_screen: [100,250], repair_battery: [60,120],  repair_charging: [50,100],  repair_camera: [80,170],  repair_water: [80,220],  repair_software: [50,100],  repair_speaker: [60,120]  },\n  Other:   { repair_screen: [80,300],  repair_battery: [60,150],  repair_charging: [50,120],  repair_camera: [80,200],  repair_water: [80,250],  repair_software: [50,110],  repair_speaker: [60,140]  }\n};\n\nconst REPAIR_LABELS = {\n  repair_screen:   'Screen Replacement',\n  repair_battery:  'Battery Replacement',\n  repair_charging: 'Charging Port Repair',\n  repair_camera:   'Camera Repair',\n  repair_water:    'Water Damage Assessment',\n  repair_software: 'Software Fix',\n  repair_speaker:  'Speaker / Mic Repair'\n};\n\n// ── Routing vars ──────────────────────────────────────────────────────────\nlet whatsappPayload;\nlet newSessionFields    = {};\nlet createBooking       = false;\nlet bookingBody         = null;\nlet performStatusLookup = false;\nlet statusLookupType    = '';\nlet statusLookupFilter  = '';\n\nconst step  = session.step;\nconst btnId = buttonReplyId;\n\n// ════════════════════════════════════════════════════════════════════════\n// BOOKING FLOW\n// ════════════════════════════════════════════════════════════════════════\n\nif (btnId === 'book_appointment') {\n  newSessionFields = { Phone: from, Step: 'booking_device', TempDevice: '', TempProblem: '', TempDate: '' };\n  whatsappPayload  = listMsg('📱 What type of device needs repair?', 'Select Device', DEVICE_ROWS);\n\n} else if (step === 'booking_device') {\n  const device = (btnId && DEVICE_MAP[btnId]) ? DEVICE_MAP[btnId] : messageText;\n  newSessionFields = { Phone: from, Step: 'booking_problem', TempDevice: device };\n  whatsappPayload  = textMsg(`Got it — *${device}* 👍\\n\\nPlease describe the problem with your device:\\n_(e.g. cracked screen, won't charge, water damage, camera issue)_`);\n\n} else if (step === 'booking_problem') {\n  newSessionFields = { Phone: from, Step: 'booking_date', TempProblem: messageText };\n  whatsappPayload  = textMsg(`Noted! 📝\\n\\nWhat date would you prefer to bring in your device?\\n_Reply with a date, e.g: *28 Feb 2026*_`);\n\n} else if (step === 'booking_date') {\n  newSessionFields = { Phone: from, Step: 'booking_time', TempDate: messageText };\n  whatsappPayload  = buttonMsg(\n    `What time works for you on *${messageText}*? 🕐`,\n    'Open Mon–Sat, 9am–6pm',\n    [\n      { id: 'time_morning',   title: 'Morning (9am-12pm)' },\n      { id: 'time_afternoon', title: 'Afternoon (12-4pm)' },\n      { id: 'time_evening',   title: 'Evening (4-6pm)'    }\n    ]\n  );\n\n} else if (step === 'booking_time') {\n  const timeMap  = { time_morning: 'Morning (9am–12pm)', time_afternoon: 'Afternoon (12–4pm)', time_evening: 'Evening (4–6pm)' };\n  const timeSlot = (btnId && timeMap[btnId]) ? timeMap[btnId] : messageText;\n  const ref      = 'JT-' + Date.now().toString().slice(-6);\n  newSessionFields = { Phone: from, Step: 'idle', TempDevice: '', TempProblem: '', TempDate: '' };\n  createBooking    = true;\n  bookingBody      = {\n    records: [{ fields: {\n      Reference: ref, CustomerName: customerName, Phone: from,\n      Device: session.tempDevice, Problem: session.tempProblem,\n      PreferredDate: session.tempDate, PreferredTime: timeSlot, Status: 'Pending'\n    }}]\n  };\n  whatsappPayload = textMsg(\n    `✅ *Booking Confirmed!*\\n\\n` +\n    `📋 *Ref:* ${ref}\\n` +\n    `📱 *Device:* ${session.tempDevice}\\n` +\n    `🔧 *Problem:* ${session.tempProblem}\\n` +\n    `📅 *Date:* ${session.tempDate}\\n` +\n    `🕐 *Time:* ${timeSlot}\\n\\n` +\n    `We'll see you then! To reschedule, just send us a message.\\n— *JERRYTECH Phone Repairs* 🛠️`\n  );\n\n// ════════════════════════════════════════════════════════════════════════\n// STATUS CHECK FLOW\n// ════════════════════════════════════════════════════════════════════════\n\n} else if (btnId === 'check_status') {\n  newSessionFields = { Phone: from, Step: 'status_ref_lookup' };\n  whatsappPayload  = textMsg(\n    `🔍 Please enter your booking reference number to check your repair status.\\n\\n_Example: *JT-483921*_\\n\\nNo reference? Reply *PHONE* to search by your WhatsApp number.`\n  );\n\n} else if (step === 'status_ref_lookup') {\n  const isPhoneLookup = messageText.trim().toUpperCase() === 'PHONE';\n  const lookupValue   = isPhoneLookup ? from : messageText.trim().toUpperCase();\n  newSessionFields    = { Phone: from, Step: 'idle' };\n  performStatusLookup = true;\n  statusLookupType    = isPhoneLookup ? 'phone' : 'reference';\n  statusLookupFilter  = isPhoneLookup\n    ? encodeURIComponent(`({Phone}='${from}')`)\n    : encodeURIComponent(`({Reference}='${lookupValue}')`);\n  whatsappPayload = null;\n\n// ════════════════════════════════════════════════════════════════════════\n// PRICE QUOTE FLOW\n// ════════════════════════════════════════════════════════════════════════\n\n} else if (btnId === 'get_quote') {\n  // Step 1 — Ask for device type\n  newSessionFields = { Phone: from, Step: 'quote_device', TempDevice: '' };\n  whatsappPayload  = listMsg(\n    '💰 Get an instant price estimate!\\n\\nWhat type of device do you have?',\n    'Select Device',\n    DEVICE_ROWS\n  );\n\n} else if (step === 'quote_device') {\n  // Step 2 — Got device, ask for repair type\n  const device = (btnId && DEVICE_MAP[btnId]) ? DEVICE_MAP[btnId] : messageText;\n  newSessionFields = { Phone: from, Step: 'quote_repair', TempDevice: device };\n  whatsappPayload  = listMsg(\n    `Great — *${device}* 📱\\n\\nWhat type of repair do you need a quote for?`,\n    'Select Repair',\n    [\n      { id: 'repair_screen',   title: 'Screen',        description: 'Cracked / broken screen'      },\n      { id: 'repair_battery',  title: 'Battery',       description: 'Battery replacement'           },\n      { id: 'repair_charging', title: 'Charging Port', description: \"Won't charge / loose port\"     },\n      { id: 'repair_camera',   title: 'Camera',        description: 'Camera not working'             },\n      { id: 'repair_water',    title: 'Water Damage',  description: 'Liquid damage assessment'      },\n      { id: 'repair_software', title: 'Software Fix',  description: 'Virus, slow, won\\'t boot'      },\n      { id: 'repair_speaker',  title: 'Speaker / Mic', description: 'Audio issue'                   }\n    ]\n  );\n\n} else if (step === 'quote_repair') {\n  // Step 3 — Look up price and return estimate with Book Now button\n  const repairId   = btnId || 'repair_screen';\n  const device     = session.tempDevice || 'Other';\n  const priceRange = (PRICES[device] || PRICES['Other'])[repairId] || [80, 300];\n  const label      = REPAIR_LABELS[repairId] || 'Repair';\n\n  newSessionFields = { Phone: from, Step: 'idle' };\n  whatsappPayload  = buttonMsg(\n    `💰 *JERRYTECH Price Estimate*\\n\\n` +\n    `📱 *Device:* ${device}\\n` +\n    `🔧 *Repair:* ${label}\\n` +\n    `💵 *Estimate:* GHS ${priceRange[0]} – GHS ${priceRange[1]}\\n\\n` +\n    `_Final price may vary by model & parts availability.\\nBring in your device for a free physical assessment!_`,\n    'Ready to fix it? Tap below!',\n    [\n      { id: 'book_appointment', title: 'Book Appointment'  },\n      { id: 'get_quote',        title: 'Get Another Quote' }\n    ]\n  );\n\n// ════════════════════════════════════════════════════════════════════════\n// DEFAULT — Show main menu\n// ════════════════════════════════════════════════════════════════════════\n\n} else {\n  newSessionFields = { Phone: from, Step: 'idle' };\n  whatsappPayload  = buttonMsg(\n    `Hi ${customerName}! 👋 Welcome to *JERRYTECH Phone Repairs*. 📱\\n\\nWe fix phones fast & affordably.\\nHow can we help you today?`,\n    'Tap a button below to get started',\n    [\n      { id: 'book_appointment', title: 'Book Appointment'   },\n      { id: 'check_status',     title: 'Check Repair Status' },\n      { id: 'get_quote',        title: 'Get a Quote'        }\n    ]\n  );\n}\n\nconst sessionBody = {\n  performUpsert: { fieldsToMergeOn: ['Phone'] },\n  records: [{ fields: newSessionFields }]\n};\n\nreturn [{ json: {\n  phoneNumberId, whatsappPayload, createBooking, sessionBody, bookingBody,\n  performStatusLookup, statusLookupType, statusLookupFilter\n} }];"
+      },
+      "id": "c301-node-0004-0004-000000000004",
+      "name": "Main Bot Brain",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/Sessions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.AIRTABLE_API_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody":    true,
+        "specifyBody": "json",
+        "jsonBody":    "={{ JSON.stringify($json.sessionBody) }}",
+        "options": {}
+      },
+      "id": "c301-node-0005-0005-000000000005",
+      "name": "Upsert Session in Airtable",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "check-status-lookup",
+              "leftValue": "={{ $('Main Bot Brain').first().json.performStatusLookup }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "c301-node-0006-0006-000000000006",
+      "name": "IF: Status Lookup?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/Bookings?filterByFormula={{ $('Main Bot Brain').first().json.statusLookupFilter }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.AIRTABLE_API_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c301-node-0007-0007-000000000007",
+      "name": "Get Booking from Airtable",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1560, 140]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the repair status reply from the Airtable Bookings query result.\n\nconst records  = $input.first().json.records || [];\nconst brain    = $('Main Bot Brain').first().json;\nconst from     = $('Extract Message Data').first().json.from;\nconst { phoneNumberId, statusLookupType } = brain;\n\nlet responseText;\n\nif (records.length === 0) {\n  const hint = statusLookupType === 'phone'\n    ? 'your WhatsApp number'\n    : 'that reference number';\n  responseText =\n    `❌ We couldn't find any bookings linked to ${hint}.\\n\\n` +\n    `Please double-check your reference (e.g. *JT-483921*) and try again, ` +\n    `or message us directly and we'll look it up for you.\\n— *JERRYTECH Phone Repairs* 🛠️`;\n} else {\n  // If multiple bookings, show the most recent (first returned)\n  const b = records[0].fields;\n  const statusEmoji = {\n    'Pending':     '⏳',\n    'Confirmed':   '✅',\n    'In Progress': '🔧',\n    'Completed':   '🎉',\n    'Cancelled':   '❌'\n  }[b.Status] || '📋';\n\n  responseText =\n    `${statusEmoji} *Repair Status Update*\\n\\n` +\n    `📋 *Ref:*     ${b.Reference    || 'N/A'}\\n` +\n    `📱 *Device:*  ${b.Device       || 'N/A'}\\n` +\n    `🔧 *Problem:* ${b.Problem      || 'N/A'}\\n` +\n    `📅 *Date:*    ${b.PreferredDate || 'N/A'}\\n` +\n    `🕐 *Time:*    ${b.PreferredTime || 'N/A'}\\n` +\n    `📊 *Status:*  *${b.Status}*\\n\\n` +\n    `Questions? Just reply to this message and we'll assist you.\\n— *JERRYTECH Phone Repairs* 🛠️`;\n}\n\nreturn [{\n  json: {\n    phoneNumberId,\n    whatsappPayload: {\n      messaging_product: 'whatsapp',\n      recipient_type:    'individual',\n      to:                from,\n      type:              'text',\n      text:              { body: responseText }\n    }\n  }\n}];"
+      },
+      "id": "c301-node-0008-0008-000000000008",
+      "name": "Build Status Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 140]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $json.phoneNumberId }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody":    true,
+        "specifyBody": "json",
+        "jsonBody":    "={{ JSON.stringify($json.whatsappPayload) }}",
+        "options": {}
+      },
+      "id": "c301-node-0009-0009-000000000009",
+      "name": "Send Status Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 140]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "check-create-booking",
+              "leftValue": "={{ $('Main Bot Brain').first().json.createBooking }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "c301-node-0010-0010-000000000010",
+      "name": "IF: Create Booking?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1560, 460]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/Bookings",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.AIRTABLE_API_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody":    true,
+        "specifyBody": "json",
+        "jsonBody":    "={{ JSON.stringify($('Main Bot Brain').first().json.bookingBody) }}",
+        "options": {}
+      },
+      "id": "c301-node-0011-0011-000000000011",
+      "name": "Create Booking in Airtable",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 460]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v21.0/{{ $('Main Bot Brain').first().json.phoneNumberId }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody":    true,
+        "specifyBody": "json",
+        "jsonBody":    "={{ JSON.stringify($('Main Bot Brain').first().json.whatsappPayload) }}",
+        "options": {}
+      },
+      "id": "c301-node-0012-0012-000000000012",
+      "name": "Send WhatsApp Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 460]
+    }
+  ],
+  "connections": {
+    "Webhook - Receive Message": {
+      "main": [[{ "node": "Extract Message Data",       "type": "main", "index": 0 }]]
+    },
+    "Extract Message Data": {
+      "main": [[{ "node": "Get Session from Airtable",  "type": "main", "index": 0 }]]
+    },
+    "Get Session from Airtable": {
+      "main": [[{ "node": "Main Bot Brain",              "type": "main", "index": 0 }]]
+    },
+    "Main Bot Brain": {
+      "main": [[{ "node": "Upsert Session in Airtable", "type": "main", "index": 0 }]]
+    },
+    "Upsert Session in Airtable": {
+      "main": [[{ "node": "IF: Status Lookup?",          "type": "main", "index": 0 }]]
+    },
+    "IF: Status Lookup?": {
+      "main": [
+        [{ "node": "Get Booking from Airtable", "type": "main", "index": 0 }],
+        [{ "node": "IF: Create Booking?",       "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Booking from Airtable": {
+      "main": [[{ "node": "Build Status Response",       "type": "main", "index": 0 }]]
+    },
+    "Build Status Response": {
+      "main": [[{ "node": "Send Status Message",          "type": "main", "index": 0 }]]
+    },
+    "IF: Create Booking?": {
+      "main": [
+        [{ "node": "Create Booking in Airtable", "type": "main", "index": 0 }],
+        [{ "node": "Send WhatsApp Message",      "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Booking in Airtable": {
+      "main": [[{ "node": "Send WhatsApp Message",        "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": { "templateCredsSetupCompleted": true },
+  "pinData": {}
+}

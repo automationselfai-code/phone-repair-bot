@@ -1,0 +1,63 @@
+{
+  "name": "JERRYTECH - 01 Webhook Verification",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-0001-0001-000000000001",
+      "name": "Webhook - GET Verify",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "jerrytech-whatsapp-verify"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Meta sends a GET request to verify your webhook endpoint.\n// It passes hub.mode, hub.verify_token, and hub.challenge.\n// We respond with hub.challenge only if the verify_token matches.\n\nconst query = $input.first().json.query;\nconst VERIFY_TOKEN = $env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;\n\nif (\n  query['hub.mode'] === 'subscribe' &&\n  query['hub.verify_token'] === VERIFY_TOKEN\n) {\n  return [{ json: { challenge: query['hub.challenge'] } }];\n}\n\nthrow new Error('Webhook verification failed: token mismatch');"
+      },
+      "id": "a1b2c3d4-0001-0002-0001-000000000002",
+      "name": "Verify Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.challenge }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "a1b2c3d4-0001-0003-0001-000000000003",
+      "name": "Return Challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [680, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - GET Verify": {
+      "main": [
+        [{ "node": "Verify Token", "type": "main", "index": 0 }]
+      ]
+    },
+    "Verify Token": {
+      "main": [
+        [{ "node": "Return Challenge", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "pinData": {}
+}
